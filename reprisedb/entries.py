@@ -56,35 +56,25 @@ class Entry(BaseEntry):
         '''
         return self.to_db_key(pk), self.to_db_value(value)
     
-    def get(self, datastores, pk, end_commit=None, start_commit=None):
-        if not hasattr(datastores, '__iter__'): datastores = [datastores]
+    def get(self, ds, pk, end_commit=None, start_commit=None):
+        _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
         
-        for ds in datastores:
-            _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
+        if v is not None:
+            return self.from_db_value(v)
         
-            if v is not None:
-                return self.from_db_value(v)
+        raise KeyError("Not found in datastore")
         
-        raise KeyError("Not found in any datastore")
-        
-    def contains(self, datastores, pk, end_commit=None, start_commit=None):
-        if not hasattr(datastores, '__iter__'): datastores = [datastores]
-        for ds in datastores:
-            _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
+    def contains(self, ds, pk, end_commit=None, start_commit=None):
+
+        _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
             
-            if v is not None:
-                return True
-        return False
+        return v is not None
         
-    def keys(self, datastores, end_commit=None, start_commit=None):
-        if not hasattr(datastores, '__iter__'): datastores = [datastores]
+    def keys(self, ds, end_commit=None, start_commit=None):
         
-        result = SortedDict()
-        
-        for ds in reversed(datastores):
-            result.update(( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit) ))
+        result = (( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit) ))
             
-        return [ self.from_db_key(k) for k, v in result.iteritems() if v != DELETED ]
+        return [ self.from_db_key(k) for k, v in result if v != DELETED ]
 
 class Index(BaseEntry):
     
@@ -134,17 +124,12 @@ class Index(BaseEntry):
         
         return a + NUL, b
     
-    def lookup(self, datastores, start_key, end_key=None, end_commit=None, start_commit=None):
-        if not hasattr(datastores, '__iter__'): datastores = [datastores]
-        
+    def lookup(self, ds, start_key, end_key=None, end_commit=None, start_commit=None):
         start_key, end_key = self.key_range(start_key, end_key)
         
-        result = {}
+        result = (( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit, start_key, end_key) ))
         
-        for ds in reversed(datastores):
-            result.update(( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit, start_key, end_key) ))
-        
-        return SortedList(( self.from_db_key(k)[1] for k, v in result.iteritems() if v == '+' ))
+        return SortedList(( self.from_db_key(k)[1] for k, v in result if v == '+' ))
 
 if __name__ == '__main__':
     import doctest
@@ -158,8 +143,8 @@ if __name__ == '__main__':
     for f in os.listdir('testing'):
         os.unlink(os.path.join('testing', f))
     
-    #db = drivers.LMDBDriver('testing')
-    db = drivers.MemoryDriver()
+    db = drivers.LMDBDriver('testing')
+    #db = drivers.MemoryDriver()
     
     d = RevisionDataStore(db.get_db('names'), 0)
     

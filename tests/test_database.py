@@ -1,7 +1,9 @@
 from unittest import TestCase
 import os.path
 
-from reprisedb import drivers, database
+import logging
+
+from reprisedb import database, packers
 
 class DatabaseTestCase(TestCase):
     
@@ -36,6 +38,35 @@ class DatabaseTestCase(TestCase):
         t = self.db.begin()
         self.assertEqual(t.keys('people'), [1, 2])
         self.assertEqual(t.get('people', 1), 'Bob')
+        
+    def test_iter_items(self):
+        self.db.create_collection('people', value_packer='p_string')
+        self.load_data((('people', 3, 'Bob'),
+                        ('people', 6, 'Fred'),
+                        ('people', 23, 'Andy')))
+        
+        t = self.db.begin()
+        ds = t.get_datastore('people')
+        
+        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Bob', 'Fred', 'Andy'])
+        
+        t.put('people', 9, 'Charlie')
+        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Bob', 'Fred', 'Charlie', 'Andy'])
+        
+        t.put('people', 43, 'Terry')
+        t.put('people', 1, 'Ethan')
+        t.put('people', 6, 'Frank')
+        
+        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Ethan', 'Bob', 'Frank', 'Charlie', 'Andy', 'Terry'])
+        
+        self.assertEqual([ x[2] for x in ds.iter_items(start_key=packers.p_uint32.pack(6)) ],
+                         ['Frank', 'Charlie', 'Andy', 'Terry'])
+        self.assertEqual([ x[2] for x in ds.iter_items(end_key=packers.p_uint32.pack(23)) ],
+                         ['Ethan', 'Bob', 'Frank', 'Charlie'])
+        self.assertEqual([ x[2] for x in ds.iter_items(start_key=packers.p_uint32.pack(6), end_key=packers.p_uint32.pack(23)) ],
+                         ['Frank', 'Charlie'])
+        
+        
         
     def test_blocked_commit(self):
         self.db.create_collection('people', value_packer='p_string')

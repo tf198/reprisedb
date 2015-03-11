@@ -121,25 +121,62 @@ class RevisionDataStore(object):
                     print "%r => %r [%d]" % (k, v, r)
         print "=== END ENV ==="
         
-class MemoryDataStore(object):
+class TransactionDataStore(object):
+    '''
+    Wraps a DataStore object and proxies calls.
+    '''
     
-    def __init__(self, commit):
+    def __init__(self, ds):
         self._data = SortedDict()
-        self.commit = commit
+        self.ds = ds
         
-    def store(self, data, commit):
+    def store(self, data):
         self._data.update(data)
-        self.commit = commit
         
     def get_item(self, key, end_commit=None, start_commit=None):
         try:
-            return self.commit, self._data[key]
+            return None, self._data[key]
         except KeyError:
-            return None, None
+            return self.ds.get_item(key, end_commit, start_commit)
     
     def iter_items(self, end_commit=None, start_commit=None, start_key='', end_key=None):
-        for k, v in self._data.iteritems():
-            if k < start_key: continue
-            if end_key and k > end_key: break
+        
+        i_self = self._data.iteritems()
+        i_ds = self.ds.iter_items(end_commit, start_commit, start_key, end_key)
+        
+        try:
+            k_ds, r_ds, v_ds = i_ds.next()
+        except StopIteration:
+            k_ds = None
+        
+        for k_self, v_self in i_self:
+            # advance to first key
+            if k_self < start_key: continue
             
-            yield k, self.commit, v
+            try:
+                if k_ds is not None:
+                    while k_ds < k_self:
+                        #logger.debug("YIELD PROXY %r => %r", k_ds, v_ds)
+                        yield k_ds, r_ds, v_ds
+                        k_ds, r_ds, v_ds = i_ds.next()
+                        
+                    if k_ds == k_self:
+                        k_ds, r_ds, v_ds = i_ds.next()
+            except StopIteration:
+                k_ds = None
+            
+            if end_key and k_self > end_key: break
+            
+            #logger.debug("YIELD LOCAL %r => %r", k_self, v_self)
+            yield k_self, None, v_self
+            
+        #logger.debug("Finished local items")
+            
+        # run out the rest of the ds iterator
+        while k_ds:
+            #logger.debug("YIELD PROXY %r => %r", k_ds, v_ds)
+            yield k_ds, r_ds, v_ds
+            k_ds, r_ds, v_ds = i_ds.next()
+            
+        #logger.debug("Finished proxy items")
+

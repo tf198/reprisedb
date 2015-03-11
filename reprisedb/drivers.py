@@ -1,7 +1,5 @@
 import os.path
 
-from contextlib import contextmanager
-
 import logging
 logger = logging.getLogger(__name__)
 

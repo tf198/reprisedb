@@ -1,6 +1,6 @@
 import drivers
 from reprisedb import packers, entries
-from reprisedb.datastore import RevisionDataStore, MemoryDataStore
+from reprisedb.datastore import RevisionDataStore, TransactionDataStore
 from contextlib import contextmanager
 import hashlib
 
@@ -213,26 +213,19 @@ class Transaction(object):
     def __init__(self, db, current_commit):
         self.db = db
         self.current_commit = current_commit
-        #self._data = SortedList()
-        self._cache = {}
+        
+        self._datastores = SortedDict()
         self._updates = {}
-        self._checksum = hashlib.sha1()
-        
-        self._ms = SortedDict()
-        
-    def get_ms(self, name):
-        if not name in self._ms:
-            self._ms[name] = MemoryDataStore(self.current_commit)
-            
-        return self._ms[name]
     
-    def get_datastores(self, name):
-        return [self.get_ms(name), self.db.get_rds(name)]
+    def get_datastore(self, name):
+        if not name in self._datastores:
+            self._datastores[name] = TransactionDataStore(self.db.get_rds(name))
+        return self._datastores[name]
         
     def get(self, collection, key, default=None, track=True):
         c = self.db.get_collection(collection)
         try:
-            return c.entry.get(self.get_datastores(collection), key, end_commit=self.current_commit)
+            return c.entry.get(self.get_datastore(collection), key, end_commit=self.current_commit)
         except KeyError:
             return default
     
@@ -251,11 +244,11 @@ class Transaction(object):
         c = self.db.get_collection(collection)
         
         #self._data.add((collection, ) + c.entry.prepare(pk, value))
-        self.get_ms(collection).store([c.entry.prepare(pk, value)], self.current_commit)
+        self.get_datastore(collection).store([c.entry.prepare(pk, value)])
         
         if track and index:
             for n, k, v in c.index(pk, value, old_value):
-                self.get_ms(n).store([(k, v)], self.current_commit)
+                self.get_datastore(n).store([(k, v)])
         
         self._updates.setdefault(collection, set()).add(pk)
         
@@ -267,13 +260,13 @@ class Transaction(object):
         
     def keys(self, collection):
         c = self.db.get_collection(collection)
-        return c.entry.keys(self.get_datastores(collection), end_commit=self.current_commit)
+        return c.entry.keys(self.get_datastore(collection), end_commit=self.current_commit)
         
     def lookup(self, collection, accessor, start_key, end_key=None):
         c = self.db.get_collection(collection)
         
         db, indexer = c.get_indexer(accessor)
-        return indexer.lookup(self.get_datastores(db), start_key, end_key, end_commit=self.current_commit)
+        return indexer.lookup(self.get_datastore(db), start_key, end_key, end_commit=self.current_commit)
         
     def commit(self, c=None):
         
@@ -290,23 +283,24 @@ class Transaction(object):
                 raise
         
         commit = {'updates': { k: list(s) for k, s in self._updates.iteritems() },
-                  'checksum': self._checksum.digest()}
-        
+                  'checksum': ""}
+        #
         self.put('_commits', self.current_commit, commit, track=False)
         self.put('_commits', 0, self.current_commit, track=False)
         
         # send the data to the datastores
-        for n, ms in self._ms.iteritems():
-            self.db.get_rds(n).store(ms._data.iteritems(), self.current_commit)
+        for n, tds in self._datastores.iteritems():
+            self.db.get_rds(n).store(tds._data.iteritems(), self.current_commit)
         
-        self._ms.clear()
-        self._cache = {}
+        self._datastores.clear()
         self._updates = {}
         
         return self.current_commit
     
     def conflicts(self):
         result = []
+        
+        logger.debug("Checking for conflicts: %r", self._updates)
         
         current = self.db.current_commit()
         for c in xrange(self.current_commit+1, current+1):
@@ -316,14 +310,18 @@ class Transaction(object):
             # compare the changes
             for n, items in commit['updates'].iteritems():
                 for k in self._updates.setdefault(n, set()) & set(items):
+                    logger.debug("CONFLICT: %r, %r, %r", n, k, c)
                     result.append((n, k, c, t.get(n, k)))
             
             if not result:
-                logger.debug("Non hlocking commit: %d", c)
+                logger.debug("Non blocking commit: %d", c)
                 self.current_commit = c
         
-        if result == []: return None
+        if result == []:
+            logger.debug("No blocking commits found")
+            return None
         
+        logger.debug("Blocking commits: %r", result)
         return result
         
             
@@ -342,31 +340,35 @@ if __name__ == '__main__':
     t1.put('people', 1, {'first_name': 'Bob'})
     print t1.get('people', 1)
     assert t1.get('people', 1)['first_name'] == 'Bob'
+    
     assert t1.keys('people') == [1]
-    
+     
     print "COMMIT", t1.commit()
-    
+     
     assert t1.lookup('people', 'first_name', 'Boa', 'Bod') == [1]
     assert t1.lookup('people', 'first_name', 'Char', 'Chad') == []
-    
+     
     t2 = db.begin()
     assert t2.get('people', 1)['first_name'] == 'Bob'
     assert t2.lookup('people', 'first_name', 'Boa', 'Bod') == [1]
-     
+      
     t2.put('people', 1, {'first_name': 'Robert'})
     t2.put('people', 2, {'first_name': 'Andy'})
     t2.put('people', 3, {'first_name': 'Andrew'})
-     
+      
     assert t2.get('people', 1)['first_name'] == 'Robert'
     assert t1.get('people', 1)['first_name'] == 'Bob'
-     
+      
     assert t2.lookup('people', 'first_name', 'A', 'C') == [2, 3]
     assert t1.lookup('people', 'first_name', 'A', 'C') == [1]
-    
+     
     t2.commit()
-    
+     
     t1.put('people', 2, {'first_name': 'Dave'})
-    t1.commit()
+    try:
+        t1.commit()
+    except RepriseDBIntegrityError:
+        pass
     
 #     t2.put('people', 1, {'first_name': 'Robert'})
 #     t2.put('people', 2, {'first_name': 'Andy'})
