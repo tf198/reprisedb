@@ -98,6 +98,8 @@ class DatabaseTestCase(TestCase):
         t1.put('people', 3, 'Dave')
         c1 = t1.commit()
         
+        self.assertEqual(t1.get('_commits', c1)['updates'], {'people': [3]})
+        
         t2.put('people', 2, 'Andy')
         t2.put('people', 1, 'Jane')
         
