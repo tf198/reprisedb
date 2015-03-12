@@ -1,24 +1,14 @@
-import drivers
-from reprisedb import packers, entries
+from reprisedb import packers, entries, drivers, utils
 from reprisedb.datastore import RevisionDataStore, TransactionDataStore
+
 from contextlib import contextmanager
 import hashlib
+import itertools
 
 from sortedcontainers import SortedDict
 
 import logging
 logger = logging.getLogger(__name__)
-
-def dotted_accessor(d, accessor, default=None):
-    if d is None:
-        return default
-    
-    try:
-        for p in accessor.split('.'):
-            d = d[p]
-        return d
-    except KeyError:
-        return default
 
 class RepriseDBIntegrityError(Exception): pass
 
@@ -180,8 +170,8 @@ class Collection(object):
         result = []
         
         for accessor in self.meta['indexes']:
-            new_value = dotted_accessor(new_item, accessor)
-            old_value = dotted_accessor(old_item, accessor)
+            new_value = utils.dotted_accessor(new_item, accessor)
+            old_value = utils.dotted_accessor(old_item, accessor)
             
             if new_value != old_value:
                 
@@ -201,7 +191,7 @@ class Collection(object):
     def get_indexer(self, accessor):
         if not accessor in self._indexes:
             if not accessor in self.meta['indexes']:
-                raise Exception("No index available for %s" % accessor)
+                raise KeyError("No index available for %s" % accessor)
             
             packer = self.meta['indexes'][accessor]
             self._indexes[accessor] = entries.Index(self.key_packer, getattr(packers, packer))
@@ -221,11 +211,19 @@ class Transaction(object):
         if not name in self._datastores:
             self._datastores[name] = TransactionDataStore(self.db.get_rds(name))
         return self._datastores[name]
-        
-    def get(self, collection, key, default=None, track=True):
+    
+    def get_entry(self, collection):
+        return entries.BoundEntry(self.db.get_collection(collection).entry, self.get_datastore(collection), self.current_commit)
+    
+    def get_index(self, collection, accessor):
         c = self.db.get_collection(collection)
+        db, indexer = c.get_indexer(accessor)
+        return entries.BoundIndex(indexer, self.get_datastore(db), self.current_commit)
+    
+    def get(self, collection, key, default=None):
+        ' convenience method for t.get_entry(collection).get(key) '
         try:
-            return c.entry.get(self.get_datastore(collection), key, end_commit=self.current_commit)
+            return self.get_entry(collection).get(key)
         except KeyError:
             return default
     
@@ -234,7 +232,7 @@ class Transaction(object):
         #print "PUT", collection, pk, value
         
         if track:
-            old_value = self.get(collection, pk, track=track)
+            old_value = self.get(collection, pk)
         
             if value == old_value:
                 logger.debug("Skipping put - no changes")
@@ -259,14 +257,20 @@ class Transaction(object):
         self.put(collection, pk, None)
         
     def keys(self, collection):
-        c = self.db.get_collection(collection)
-        return c.entry.keys(self.get_datastore(collection), end_commit=self.current_commit)
+        return self.get_entry(collection).keys()
+
+    def lookup(self, collection, accessor, start_key, end_key=None, offset=0, length=None):
         
-    def lookup(self, collection, accessor, start_key, end_key=None):
-        c = self.db.get_collection(collection)
+        index = self.get_index(collection, accessor)
         
-        db, indexer = c.get_indexer(accessor)
-        return indexer.lookup(self.get_datastore(db), start_key, end_key, end_commit=self.current_commit)
+        i = index.iter_lookup_keys(start_key, end_key)
+        
+        if offset or length:
+            if length is not None: length += offset
+            i = itertools.islice(i, offset, length)
+        
+        return list(i)
+        
         
     def commit(self, c=None):
         

@@ -1,9 +1,10 @@
 from unittest import TestCase
 import os.path
+import itertools
 
 import logging
 
-from reprisedb import database, packers
+from reprisedb import database, packers, DELETED
 
 class DatabaseTestCase(TestCase):
     
@@ -36,37 +37,41 @@ class DatabaseTestCase(TestCase):
                         ('people', 2, 'Fred')))
         
         t = self.db.begin()
-        self.assertEqual(t.keys('people'), [1, 2])
-        self.assertEqual(t.get('people', 1), 'Bob')
         
-    def test_iter_items(self):
-        self.db.create_collection('people', value_packer='p_string')
-        self.load_data((('people', 3, 'Bob'),
-                        ('people', 6, 'Fred'),
-                        ('people', 23, 'Andy')))
+        self.assertEqual(t.get('people', 1), 'Bob')
+        self.assertEqual(t.keys('people'), [1, 2])
+        
+    def test_lookups(self):
+        self.db.create_collection('people', value_packer='p_dict')
+        self.db.add_index('people', 'name', 'p_string')
+        self.load_data((('people', 3, {'name': 'Bob'}),
+                        ('people', 6, {'name': 'Brenda'}),
+                        ('people', 23, {'name': 'Borris'}),
+                        ('people', 9, {'name': 'Andy'}),
+                        ('people', 12, {'name': 'Zavier'})))
         
         t = self.db.begin()
-        ds = t.get_datastore('people')
         
-        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Bob', 'Fred', 'Andy'])
+        self.assertEqual(t.lookup('people', 'name', '', '~'), [9, 3, 23, 6, 12])
         
-        t.put('people', 9, 'Charlie')
-        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Bob', 'Fred', 'Charlie', 'Andy'])
+        self.assertEqual(t.lookup('people', 'name', 'Bob'), [3])
+        self.assertEqual(t.lookup('people', 'name', 'Bo', 'Bp'), [3, 23])
         
-        t.put('people', 43, 'Terry')
-        t.put('people', 1, 'Ethan')
-        t.put('people', 6, 'Frank')
+        t.put('people', 21, {'name': 'Andrew'})
+        t.put('people', 14, {'name': 'Bruce'})
+        t.delete('people', 23)
         
-        self.assertEqual([ x[2] for x in ds.iter_items() ], ['Ethan', 'Bob', 'Frank', 'Charlie', 'Andy', 'Terry'])
+        self.assertEqual(t.lookup('people', 'name', '', '~'), [21, 9, 3, 6, 14, 12])
         
-        self.assertEqual([ x[2] for x in ds.iter_items(start_key=packers.p_uint32.pack(6)) ],
-                         ['Frank', 'Charlie', 'Andy', 'Terry'])
-        self.assertEqual([ x[2] for x in ds.iter_items(end_key=packers.p_uint32.pack(23)) ],
-                         ['Ethan', 'Bob', 'Frank', 'Charlie'])
-        self.assertEqual([ x[2] for x in ds.iter_items(start_key=packers.p_uint32.pack(6), end_key=packers.p_uint32.pack(23)) ],
-                         ['Frank', 'Charlie'])
+        self.assertEqual(t.lookup('people', 'name', 'Bob'), [3])
+        self.assertEqual(t.lookup('people', 'name', 'Bruce'), [14])
+        self.assertEqual(t.lookup('people', 'name', 'Br', 'Bs'), [6, 14])
         
-        
+        # test offset and length
+        self.assertEqual(t.lookup('people', 'name', 'Andy', 'C'), [9, 3, 6, 14])
+        self.assertEqual(t.lookup('people', 'name', 'Andy', 'C', offset=2), [6, 14])
+        self.assertEqual(t.lookup('people', 'name', 'Andy', 'C', length=2), [9, 3])
+        self.assertEqual(t.lookup('people', 'name', 'Andy', 'C', offset=1, length=2), [3, 6])
         
     def test_blocked_commit(self):
         self.db.create_collection('people', value_packer='p_string')

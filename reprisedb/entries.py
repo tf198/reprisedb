@@ -1,11 +1,9 @@
 from . import RepriseDataError, NUL, ONE, DELETED
 
-from sortedcontainers import SortedDict, SortedList
+from reprisedb import packers # @UnusedImport
 
 import logging
 logger = logging.getLogger(__name__)
-
-from reprisedb import packers
 
 class BaseEntry(object):
     
@@ -44,9 +42,6 @@ class Entry(BaseEntry):
         
         return self.value_packer.unpack(value)
     
-    def bulk_prepare(self, d):
-        return [ self.prepare(k, d[k]) for k in d ]
-    
     def prepare(self, pk, value):
         '''
         >>> Entry(packers.p_uint32, packers.p_string).prepare(34, 'Bob')
@@ -55,26 +50,60 @@ class Entry(BaseEntry):
         ('foo\\x00', 'bar')
         '''
         return self.to_db_key(pk), self.to_db_value(value)
+
+class BoundEntry(object):
     
-    def get(self, ds, pk, end_commit=None, start_commit=None):
-        _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
+    def __init__(self, entry, ds, end_commit=None, start_commit=None):
+        self.entry = entry
+        self.ds = ds
+        self.end_commit = end_commit
+        self.start_commit = start_commit
+    
+    def get(self, pk):
+        _r, v = self.ds.get_item(self.entry.to_db_key(pk), self.end_commit, self.start_commit)
         
         if v is not None:
-            return self.from_db_value(v)
+            return self.entry.from_db_value(v)
         
         raise KeyError("Not found in datastore")
+    
+    def bulk_put(self, d, commit):
+        return self.ds.store(( self.entry.prepare(pk, value) for pk, value in d.iteritems() ), commit)        
+    
+    def iter_get(self, keys):
+        packed_keys = ( self.entry.to_db_key(k) for k in keys )
         
-    def contains(self, ds, pk, end_commit=None, start_commit=None):
-
-        _r, v = ds.get_item(self.to_db_key(pk), end_commit, start_commit)
+        return ( self.entry.from_db_value(v) for k, _r, v in self.ds.iter_get(packed_keys, self.end_commit, self.start_commit))
+    
+    def iter_items(self, start_key=None, end_key=None):
+        if start_key is not None: start_key = self.entry.to_db_key(start_key)
+        if end_key is not None: end_key = self.entry.to_db_key(end_key)
+        
+        return ( (self.entry.from_db_key(k),
+                  self.entry.from_db_value(v)) for k, _r, v in self.ds.iter_items(start_key,
+                                                                                  end_key,
+                                                                                  self.end_commit,
+                                                                                  self.start_commit) if v != DELETED )
+    
+    def iter_keys(self, start_key=None, end_key=None):
+        return ( self.entry.from_db_key(k) for k, _r, v in self.ds.iter_items(start_key,
+                                                                              end_key,
+                                                                              self.end_commit,
+                                                                              self.start_commit) if v != DELETED )
+    
+    def iter_values(self, start_key=None, end_key=None):
+        return ( self.entry.from_db_value(v) for k, _r, v in self.ds.iter_items(start_key,
+                                                                                end_key,
+                                                                                self.end_commit,
+                                                                                self.start_commit) if v != DELETED )
+        
+    def contains(self, pk):
+        _r, v = self.ds.get_item(self.entry.to_db_key(pk), self.end_commit, self.start_commit)
             
         return v is not None
         
-    def keys(self, ds, end_commit=None, start_commit=None):
-        
-        result = (( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit) ))
-            
-        return [ self.from_db_key(k) for k, v in result if v != DELETED ]
+    def keys(self):
+        return list(self.iter_keys())
 
 class Index(BaseEntry):
     
@@ -123,90 +152,27 @@ class Index(BaseEntry):
             b = self.value_packer.pack(end_key) + NUL
         
         return a + NUL, b
-    
-    def lookup(self, ds, start_key, end_key=None, end_commit=None, start_commit=None):
-        start_key, end_key = self.key_range(start_key, end_key)
-        
-        result = (( (k, v) for k, _r, v in ds.iter_items(end_commit, start_commit, start_key, end_key) ))
-        
-        return SortedList(( self.from_db_key(k)[1] for k, v in result if v == '+' ))
 
-if __name__ == '__main__':
-    import doctest
-    print doctest.testmod()
+class BoundIndex(object):
     
-    import os.path
-    from datastore import RevisionDataStore
-    
-    import drivers
-    
-    for f in os.listdir('testing'):
-        os.unlink(os.path.join('testing', f))
-    
-    db = drivers.LMDBDriver('testing')
-    #db = drivers.MemoryDriver()
-    
-    d = RevisionDataStore(db.get_db('names'), 0)
-    
-    entry = Entry(packers.p_string, packers.p_string)
-    
-    assert repr(entry) == "<Entry key=<StringPacker> value=<StringPacker>>"
-    
-    d.store(entry.bulk_prepare({'134': 'Andy',
-                                '156': 'Bob',
-                                '148': 'Charlie'}), 1)
-    
-    assert entry.get(d, '148') == "Charlie"
-    
-    assert entry.keys(d) == ['134', '148', '156']
-     
-    d.store(entry.bulk_prepare({"134": 'Andrew',
-                                "101": 'Dave',
-                                "156": None}), 2)
-    
-    assert entry.keys(d) == ["101", "134", "148"]
-    assert entry.keys(d, 1) == ["134", "148", "156"]
-       
-    assert entry.get(d, "148") == "Charlie"
-    assert entry.get(d, "134") == 'Andrew'
-    assert entry.get(d, "134", 1) == 'Andy'
-    #assert entry.get(d, "156") == None
-    assert entry.get(d, "156", 1) == 'Bob'
-    
-    #d.dump()
-      
-    #print d.commits(1)
-      
-    d = RevisionDataStore(db.get_db('people'), 0)
-    entry = Entry(packers.p_uint32, packers.p_dict)
-       
-    d.store(entry.bulk_prepare({134: {'name': 'Andy'},
-                                156: {'name': 'Bob'},
-                                148: {'name': 'Charlie'}}), 1)
+    def __init__(self, index, ds, end_commit=None, start_commit=None):
+        self.index = index
+        self.ds = ds
+        self.end_commit = end_commit
+        self.start_commit = start_commit
         
-    assert entry.get(d, 134) == {'name': 'Andy'}
+    def add(self, value, key, mark, commit):
+        return self.ds.store([self.index.prepare(value, key, mark)], commit)
+    
+    def bulk_add(self, l, commit):
+        return self.ds.store(( self.index.prepare(*x) for x in l ), commit)
         
-    assert entry.keys(d) == [134, 148, 156]
-     
-    d = RevisionDataStore(db.get_db('people_names'), 0)
-    index = Index(packers.p_uint32, packers.p_string)
-     
-    d.store((index.prepare('Andy', 134, '+'),
-             index.prepare('Bob', 156, '+'),
-             index.prepare('Charlie', 148, '+')), 1)
+    def iter_lookup_keys(self, start_key, end_key=None):
+        start_key, end_key = self.index.key_range(start_key, end_key)
+        return ( self.index.from_db_key(k)[1] for k, _r, v in self.ds.iter_items(start_key,
+                                                                                 end_key,
+                                                                                 self.end_commit,
+                                                                                 self.start_commit) if v == '+' )
     
-    assert index.lookup(d, 'Bob') == [156]
-        
-    d.store((index.prepare('Andy', 134, '-'),
-             index.prepare('Andrew', 134, '+'),
-             index.prepare('Dave', 101, '+'),
-             index.prepare('Bob', 156, '-')), 2)
-    
-    assert index.lookup(d, 'A', 'Z') == [101, 134, 148]
-    assert index.lookup(d, 'B', 'D') == [148]
-    assert index.lookup(d, 'B', 'D', 1) == [148, 156]
-    
-    for f in os.listdir('testing'):
-        os.unlink(os.path.join('testing', f))
-    
-    print "All assertions passed"
+    def lookup(self, start_key, end_key=None):
+        return list(self.iter_lookup_keys(start_key, end_key))
