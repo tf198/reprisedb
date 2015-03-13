@@ -1,5 +1,4 @@
-from reprisedb import packers, entries, drivers, utils
-from reprisedb.datastore import RevisionDataStore, TransactionDataStore
+from reprisedb import packers, entries, drivers, utils, datastore
 
 from contextlib import contextmanager
 import hashlib
@@ -68,7 +67,7 @@ class RepriseDB(object):
     
     def get_rds(self, name):
         if not name in self._rds:
-            self._rds[name] = RevisionDataStore(self.driver.get_db(name), self._current_commit)
+            self._rds[name] = datastore.RevisionDataStore(self.driver.get_db(name), self._current_commit)
         return self._rds[name]
     
     def drop_collection(self, name):
@@ -209,7 +208,9 @@ class Transaction(object):
     
     def get_datastore(self, name):
         if not name in self._datastores:
-            self._datastores[name] = TransactionDataStore(self.db.get_rds(name))
+            mds = datastore.MemoryDataStore()
+            
+            self._datastores[name] = datastore.ProxyDataStore((mds, self.db.get_rds(name)))
         return self._datastores[name]
     
     def get_entry(self, collection):
@@ -294,7 +295,7 @@ class Transaction(object):
         
         # send the data to the datastores
         for n, tds in self._datastores.iteritems():
-            self.db.get_rds(n).store(tds._data.iteritems(), self.current_commit)
+            self.db.get_rds(n).store(tds.datastores[0]._data.iteritems(), self.current_commit)
         
         self._datastores.clear()
         self._updates = {}

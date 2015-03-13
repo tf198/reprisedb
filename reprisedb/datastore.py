@@ -1,5 +1,15 @@
-from sortedcontainers import SortedDict
+'''
+A DataStore implements a basic interface
 
+    store(data, revision)
+    get_item(key, end_revision=None, start_revision=None)
+    iter_get(keys, end_revision=None, start_revision=None)
+    iter_items(start_key=None, end_key=None, end_revision=None, start_revision=None)
+    
+'''
+
+from sortedcontainers import SortedDict
+import zipfile, base64
 import packers
 import logging
 logger = logging.getLogger(__name__)
@@ -56,7 +66,8 @@ class RevisionDataStore(object):
                         k, r = k[:-4], k[-4:]
                         logger.debug("ITEM %r %r %r", k, r, v)
                         
-                        if k != key or r > last: r = v = None
+                        if k != key or r > last: 
+                            r = v = None
                     else:
                         logger.debug("get_item(%r, %r, %r): item not found", key, end_revision, start_revision)
                         r = v = None
@@ -82,7 +93,7 @@ class RevisionDataStore(object):
                 #logger.debug("SET_RANGE: %r", key + first)
                 if not c.set_range(key + first):
                     #logger.debug("get_item(%r, %r, %r): item not found", key, end_revision, start_revision)
-                    return None, None
+                    raise KeyError("Key not found")
                 
                 k, v = c.item()
         
@@ -90,8 +101,8 @@ class RevisionDataStore(object):
         
         #logger.debug("get_item(%r, %r, %r): %r => %r [%r]", key, end_revision, start_revision, k, r, v)
         
-        if k != key: return None, None
-        if r > last: return r, None
+        if k != key or r > last:
+            raise KeyError("Key not found")
                 
         return r, v
 
@@ -150,13 +161,15 @@ class RevisionDataStore(object):
     def info(self):
         return self.env.info()
     
-    def iter_revisions(self, start_revision, end_revision=None):
+    def iter_revisions(self, start_revision=None, end_revision=None):
         '''
         Generator yielding (key, packed revision, value)
         '''
         
-        first = self.revision_packer.pack(end_revision or start_revision + 1)
-        last = self.revision_packer.pack(start_revision)
+        first = self.revision_packer.pack(end_revision or self.revision_packer.max)
+        last = self.revision_packer.pack(start_revision or 0)
+        
+        logger.debug("RANGE: %r => %r", first, last)
         
         with self.env.begin() as txn:
             with txn.cursor() as c:
@@ -176,72 +189,149 @@ class RevisionDataStore(object):
                     k, r = self.revision_packer.extract_last(dk)
                     print "%r => %r [%d]" % (k, v, r)
         print "=== END ENV ==="
-        
-class TransactionDataStore(object):
+
+class MemoryDataStore(object):
     '''
-    Wraps a DataStore object and proxies calls.
+    A dummy datastore which doesn't implement revisioning
+    Used as the working space for a transaction.
     '''
     
-    def __init__(self, ds):
-        self._data = SortedDict()
-        self.parent = ds
+    current_revision = '\x00\x00\x00\x00' # last possible revision
+    
+    def __init__(self, backend=None, current_revision=None):
+        if backend is None:
+            backend = SortedDict()
+        self._data = backend
         
-    def store(self, data):
+        if current_revision is not None:
+            self.current_revision = packers.p_revision.pack(current_revision)
+        
+    def store(self, data, revision=None):
         self._data.update(data)
+        if revision:
+            self.current_revision = packers.p_revision.pack(revision)
         
     def get_item(self, key, end_revision=None, start_revision=None):
-        try:
-            return None, self._data[key]
-        except KeyError:
-            return self.parent.get_item(key, end_revision, start_revision)
+        return self.current_revision, self._data[key]
+    
+    def iter_get(self, keys, **kwargs):
+        for k in keys:
+            try:
+                yield k, self.current_revision, self._data[k]
+            except KeyError:
+                yield k, self.current_revision, None
+            
+    def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
+        
+        for k, v in self._data.iteritems():
+            if k < start_key: continue
+            if end_key and k >= end_key: break
+            
+            yield k, self.current_revision, v
+        
+class ArchiveDataStore(RevisionDataStore):
+    '''
+    Extension of RevisionDataStore but stores actual data in a zip archive.
+    '''
+    
+    def __init__(self, env, archive, current_commit):
+        self._archive = archive
+        super(ArchiveDataStore, self).__init__(env, current_commit)
+        
+    def store(self, data, revision):
+        self.archive(( (k, self.revision_packer.pack(revision), v) for k, v in data ))
+            
+    def archive(self, data):
+        '''
+        data should be an iterable of three tuples (key, packed_revision, value)
+        '''
+        with self.env.begin(write=True) as txn:
+            with zipfile.ZipFile(self._archive, 'a') as zf:
+                for k, r, v in data:
+                    filename = base64.b64encode(k + r)
+                    zf.writestr(filename, v)
+                    txn.put(k + r, filename)
+                
+    def get_item(self, key, end_revision=None, start_revision=None):
+        r, filename = super(ArchiveDataStore, self).get_item(key, end_revision, start_revision)
+        with zipfile.ZipFile(self._archive, 'r') as zf:
+            return r, zf.read(filename)
+    
+    def iter_extract(self, i):
+        with zipfile.ZipFile(self._archive, 'a') as zf:
+            for k, r, v in i:
+                if v is None:
+                    yield k, r, v
+                else:
+                    yield k, r, zf.read(v)
     
     def iter_get(self, keys, end_revision=None, start_revision=None):
-        
-        for k, r, v in self.parent.iter_get(keys, end_revision, start_revision):
-            try:
-                yield k, None, self._data[k]
-            except KeyError:
-                yield k, r, v
-    
-    def iter_items(self, start_key='\x00', end_key=None, end_revision=None, start_revision=None):
-        
-        i_self = self._data.iteritems()
-        i_ds = self.parent.iter_items(start_key, end_key, end_revision, start_revision)
-        
-        try:
-            k_ds, r_ds, v_ds = i_ds.next()
-        except StopIteration:
-            logger.debug("No proxy items")
-            k_ds = None
-        
-        for k_self, v_self in i_self:
-            # advance to first key
-            if k_self < start_key: continue
-            
-            try:
-                if k_ds is not None:
-                    while k_ds < k_self:
-                        logger.debug("YIELD PROXY %r => %r", k_ds, v_ds)
-                        yield k_ds, r_ds, v_ds
-                        k_ds, r_ds, v_ds = i_ds.next()
-                        
-                    if k_ds == k_self:
-                        k_ds, r_ds, v_ds = i_ds.next()
-            except StopIteration:
-                k_ds = None
-            
-            if end_key and k_self > end_key: break
-            
-            logger.debug("YIELD LOCAL %r => %r", k_self, v_self)
-            yield k_self, None, v_self
-            
-        logger.debug("Finished local items")
-            
-        # run out the rest of the ds iterator
-        while k_ds:
-            logger.debug("YIELD PROXY %r => %r", k_ds, v_ds)
-            yield k_ds, r_ds, v_ds
-            k_ds, r_ds, v_ds = i_ds.next()
-            
-        logger.debug("Finished proxy items")
+        return self.iter_extract(super(ArchiveDataStore, self).iter_get(keys, end_revision, start_revision))
+                    
+    def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
+        return self.iter_extract(super(ArchiveDataStore, self).iter_items(start_key, end_key, end_revision, start_revision))
 
+class ProxyDataStore(object):
+    '''
+    Uses a stack of different datastores behaving as one
+    Common uses include transactions (MemoryDataStore, RevisionDataStore) and 
+    loading archives (ArchiveDataStore(1), ArchiveDataStore(2), ...)
+    '''
+    
+    def __init__(self, datastores):
+        self.datastores = datastores
+        
+    def store(self, data, commit=None):
+        # just pass to top level datastore
+        return self.datastores[0].store(data, commit)
+    
+    def get_item(self, key, end_revision=None, start_revision=None):
+        for ds in self.datastores:
+            try:
+                return ds.get_item(key, end_revision, start_revision)
+            except KeyError:
+                pass
+        raise KeyError("Key not found in any datastore")
+    
+    def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
+        '''
+        Create an iterator pool.
+        '''
+        
+        # key, revision, value iterator
+        items = [ ( None, None, None, ds.iter_items(start_key, end_key, end_revision, start_revision)) for ds in self.datastores ]
+        
+        while items:
+            # find the lowest one and yield it
+            lk, r, v, i = min(items)
+            if lk is not None:
+                yield lk, r, v
+            
+            new_items = []
+            for k, r, v, i in items:
+                try:
+                    if k == lk:
+                        new_items.append(i.next() + (i, ))
+                    else:
+                        new_items.append((k, r, v, i))
+                except StopIteration:
+                    pass
+            
+            items = new_items
+            
+    def iter_get(self, keys, end_revision=None, start_revision=None):
+        
+        for key in keys:
+            found = False
+            for ds in self.datastores:
+                try:
+                    yield (key, ) + ds.get_item(key, end_revision, start_revision)
+                    found = True
+                    break
+                except KeyError:
+                    pass
+            if not found:
+                yield key, None, None
+                
+                
+        
