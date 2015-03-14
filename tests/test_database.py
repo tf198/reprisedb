@@ -1,10 +1,9 @@
 from unittest import TestCase
 import os.path
-import itertools
 
 import logging
 
-from reprisedb import database, packers, DELETED
+from reprisedb import database, drivers
 
 class DatabaseTestCase(TestCase):
     
@@ -16,10 +15,12 @@ class DatabaseTestCase(TestCase):
         
     @classmethod
     def tearDownClass(cls):
+        for f in os.listdir(cls.TESTDIR):
+            os.unlink(os.path.join(cls.TESTDIR, f))
         os.rmdir(cls.TESTDIR)
     
     def setUp(self):
-        self.db = database.RepriseDB(path=self.TESTDIR)
+        self.db = database.RepriseDB(path=self.TESTDIR, driver=drivers.BSDDBDriver)
         
     def tearDown(self):
         for f in os.listdir(self.TESTDIR):

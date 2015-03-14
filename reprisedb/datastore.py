@@ -161,7 +161,51 @@ class RevisionDataStore(object):
     def info(self):
         return self.env.info()
     
-    def iter_revisions(self, start_revision=None, end_revision=None):
+    def history(self, key, end_revision=None, start_revision=None):
+        
+        first = self.revision_packer.pack(end_revision or self.revision_packer.max)
+        last = self.revision_packer.pack(start_revision or 0)
+        
+        with self.env.begin() as txn:
+            with txn.cursor() as c:
+                
+                if not c.set_range(key + first):
+                    return
+                
+                final_key = key + last
+                
+                k, v = c.item()
+                while k < final_key:
+                    yield self.revision_packer.extract_last(k)[1], v
+                    c.next()
+                    k, v = c.item()
+                    
+    def iter_prune(self, keep=2):
+        
+        with self.env.begin(write=True) as txn:
+            with txn.cursor() as c:
+                current_key = None
+                key_count = 0
+                
+                c.first()
+                
+                while True:
+                    kr, v = c.item()
+                    k, r = self.revision_packer.extract_last(kr)
+                    
+                    if k != current_key:
+                        current_key = k
+                        key_count = 0
+                        
+                    key_count += 1
+                    if key_count > keep:
+                        yield k, r, v
+                        if not c.delete(): break
+                    else:
+                        if not c.next(): break
+                        
+    
+    def iter_revisions(self, end_revision=None, start_revision=None):
         '''
         Generator yielding (key, packed revision, value)
         '''
@@ -190,42 +234,36 @@ class RevisionDataStore(object):
                     print "%r => %r [%d]" % (k, v, r)
         print "=== END ENV ==="
 
-class MemoryDataStore(object):
+class MemoryDataStore(SortedDict):
     '''
-    A dummy datastore which doesn't implement revisioning
-    Used as the working space for a transaction.
+    In-memory datastore that represents a single revision.
+    
+    `current_revision` is just returned but no filtering will be done on it.
     '''
     
-    current_revision = '\x00\x00\x00\x00' # last possible revision
+    current_revision = '\x00\x00\x00\x00'
     
-    def __init__(self, backend=None, current_revision=None):
-        if backend is None:
-            backend = SortedDict()
-        self._data = backend
-        
-        if current_revision is not None:
-            self.current_revision = packers.p_revision.pack(current_revision)
-        
     def store(self, data, revision=None):
-        self._data.update(data)
-        if revision:
+        self.update(data)
+        
+        if revision is not None:
             self.current_revision = packers.p_revision.pack(revision)
         
     def get_item(self, key, end_revision=None, start_revision=None):
-        return self.current_revision, self._data[key]
+        return self.current_revision, self[key]
     
-    def iter_get(self, keys, **kwargs):
+    def iter_get(self, keys, end_revision=None, start_revision=None):
         for k in keys:
             try:
-                yield k, self.current_revision, self._data[k]
+                yield k, self.current_revision, self[k]
             except KeyError:
-                yield k, self.current_revision, None
-            
+                yield k, None, None
+                
     def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
         
-        for k, v in self._data.iteritems():
+        for k, v in self.iteritems():
             if k < start_key: continue
-            if end_key and k >= end_key: break
+            if end_key is not None and k >= end_key: break
             
             yield k, self.current_revision, v
         
@@ -295,7 +333,8 @@ class ProxyDataStore(object):
     
     def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
         '''
-        Create an iterator pool.
+        Creates an iterator pool and yields the highest revision version of each item (within the
+        start_revision and end_revision bounds)
         '''
         
         # key, revision, value iterator
@@ -332,6 +371,5 @@ class ProxyDataStore(object):
                     pass
             if not found:
                 yield key, None, None
-                
-                
+        
         

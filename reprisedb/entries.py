@@ -68,7 +68,10 @@ class BoundEntry(object):
         raise KeyError("Not found in datastore")
     
     def bulk_put(self, d, commit):
-        return self.ds.store(( self.entry.prepare(pk, value) for pk, value in d.iteritems() ), commit)        
+        if hasattr(d, 'iteritems'):
+            d = d.iteritems()
+        
+        return self.ds.store(( self.entry.prepare(pk, value) for pk, value in d ), commit)
     
     def iter_get(self, keys):
         packed_keys = ( self.entry.to_db_key(k) for k in keys )

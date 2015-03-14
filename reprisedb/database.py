@@ -151,8 +151,8 @@ class RepriseDB(object):
             
 class Collection(object):
     '''
-    A collection is an Entry, controlled by a key_packer and value_packer.
-    It also can contain indexes
+    A collection is an Entry (controlled by a key_packer and value_packer) and
+    its associated indexes.
     '''
     
     def __init__(self, meta):
@@ -165,7 +165,7 @@ class Collection(object):
         
         self._indexes = {}
     
-    def index(self, pk, new_item, old_item):
+    def index_item(self, pk, new_item, old_item):
         result = []
         
         for accessor in self.meta['indexes']:
@@ -246,13 +246,12 @@ class Transaction(object):
         self.get_datastore(collection).store([c.entry.prepare(pk, value)])
         
         if track and index:
-            for n, k, v in c.index(pk, value, old_value):
+            for n, k, v in c.index_item(pk, value, old_value):
                 self.get_datastore(n).store([(k, v)])
         
         self._updates.setdefault(collection, set()).add(pk)
         
         return True
-        
         
     def delete(self, collection, pk):
         self.put(collection, pk, None)
@@ -294,8 +293,9 @@ class Transaction(object):
         self.put('_commits', 0, self.current_commit, track=False)
         
         # send the data to the datastores
-        for n, tds in self._datastores.iteritems():
-            self.db.get_rds(n).store(tds.datastores[0]._data.iteritems(), self.current_commit)
+        for n, ds in self._datastores.iteritems():
+            ms = ds.datastores[0]
+            self.db.get_rds(n).store(ms.iteritems(), self.current_commit)
         
         self._datastores.clear()
         self._updates = {}

@@ -98,6 +98,37 @@ class RevisionDataStoreTestCase(BaseDataStoreTestCase):
         
         self.assertEqual(f(start_revision=2, end_revision=2), [None, 'B', None, 'D', None, 'F'])
         self.assertEqual(f(start_revision=2, end_revision=3), [None, 'B', 'CHARLIE', 'DELTA', None, 'F'])
+        
+    def test_history(self):
+        self.ds.store([('a\x00', 'A4'),
+                       ('b\x00', 'B4')], 4)
+        self.ds.store([('a\x00', 'A5'),
+                       ('c\x00', 'C5')], 5)
+        self.ds.store([('a\x00', 'A6'),
+                       ('c\x00', 'C6')], 6)
+        self.ds.store([('a\x00', 'A7'),
+                       ('b\x00', 'B7'),
+                       ('c\x00', 'C7')], 7)        
+        
+        self.assertEqual( list(self.ds.history('c\x00')), [(7, 'C7'), (6, 'C6'), (5, 'C5'), (3, 'CHARLIE'), (1, 'C')])
+        self.assertEqual( list(self.ds.history('c\x00', end_revision=5)), [(5, 'C5'), (3, 'CHARLIE'), (1, 'C')])
+        self.assertEqual( list(self.ds.history('c\x00', start_revision=3)), [(7, 'C7'), (6, 'C6'), (5, 'C5')])
+        self.assertEqual( list(self.ds.history('c\x00', end_revision=6, start_revision=3)), [(6, 'C6'), (5, 'C5')])
+        
+    def test_iter_prune(self):
+        self.ds.store([('a\x00', 'A4'),
+                       ('b\x00', 'B4')], 4)
+        self.ds.store([('a\x00', 'A5'),
+                       ('c\x00', 'C5')], 5)
+        self.ds.store([('a\x00', 'A6'),
+                       ('c\x00', 'C6')], 6)
+        self.ds.store([('a\x00', 'A7'),
+                       ('b\x00', 'B7'),
+                       ('c\x00', 'C7')], 7)
+        
+        self.assertEqual([ x[2] for x in self.ds.iter_prune(3) ], ['A4', 'A', 'CHARLIE', 'C'])
+        self.assertEqual([ x[2] for x in self.ds.iter_prune(2) ], ['A5', 'B', 'C5'])
+        
 
 class MemoryDataStoreTestCase(BaseDataStoreTestCase):
     
@@ -127,6 +158,12 @@ class ArchiveDataStoreTestCase(RevisionDataStoreTestCase):
     def get_datastore(self):
         driver = drivers.LMDBDriver(self.TESTDIR)
         return datastore.ArchiveDataStore(driver.get_db('testing'), self.TESTDIR + "/testing-archive" , 0)
+    
+    def test_history(self):
+        self.skipTest("Need to delete from archive")
+        
+    def test_iter_prune(self):
+        self.skipTest("Need to delete from archive")
     
 class ProxyDataStoreTestCase(MemoryDataStoreTestCase):
         
