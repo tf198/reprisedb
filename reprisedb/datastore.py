@@ -161,7 +161,7 @@ class RevisionDataStore(object):
     def info(self):
         return self.env.info()
     
-    def history(self, key, end_revision=None, start_revision=None):
+    def iter_history(self, key, end_revision=None, start_revision=None):
         
         first = self.revision_packer.pack(end_revision or self.revision_packer.max)
         last = self.revision_packer.pack(start_revision or 0)
@@ -219,11 +219,8 @@ class RevisionDataStore(object):
             with txn.cursor() as c:
                 for k, v in iter(c):
                     k, r = k[:-4], k[-4:]
-                    if r <= last and r > first:
+                    if r < last and r >= first:
                         yield k, r, v
-                        
-    def revisions(self,  start_revision, end_revision=None):
-        return [ (k, v) for k, _rp, v in self.iter_revisions(start_revision, end_revision) ]
     
     def dump(self):
         print "=== ENV: %s ===", self.env.path()
@@ -266,6 +263,12 @@ class MemoryDataStore(SortedDict):
             if end_key is not None and k >= end_key: break
             
             yield k, self.current_revision, v
+            
+    def iter_history(self, key, end_revision=None, start_revision=None):
+        return [(self.current_revision, self.get_item(key))]
+    
+    def iter_revisions(self, end_revision=None, start_revision=None):
+        return self.iter_items()
         
 class ArchiveDataStore(RevisionDataStore):
     '''
@@ -281,7 +284,14 @@ class ArchiveDataStore(RevisionDataStore):
             
     def archive(self, data):
         '''
-        data should be an iterable of three tuples (key, packed_revision, value)
+        Adds the items from the supplied iterable to the archive.
+        Can take the the following iterators without modification:
+        
+        * iter_get()
+        * iter_items()
+        * iter_revisions()
+        
+        Alternatively can take any iterable that yields (key, packed_revision, value)
         '''
         with self.env.begin(write=True) as txn:
             with zipfile.ZipFile(self._archive, 'a') as zf:
@@ -297,33 +307,50 @@ class ArchiveDataStore(RevisionDataStore):
     
     def iter_extract(self, i):
         with zipfile.ZipFile(self._archive, 'a') as zf:
-            for k, r, v in i:
-                if v is None:
-                    yield k, r, v
+            for d in i:
+                if d[-1] is None:
+                    yield d
                 else:
-                    yield k, r, zf.read(v)
+                    yield d[:-1] + (zf.read(d[-1]), )
     
     def iter_get(self, keys, end_revision=None, start_revision=None):
         return self.iter_extract(super(ArchiveDataStore, self).iter_get(keys, end_revision, start_revision))
                     
     def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
         return self.iter_extract(super(ArchiveDataStore, self).iter_items(start_key, end_key, end_revision, start_revision))
+    
+    def iter_prune(self, keep=2):
+        return self.iter_extract(super(ArchiveDataStore, self).iter_prune(keep))
+    
+    def iter_history(self, key, end_revision=None, start_revision=None):
+        return self.iter_extract(super(ArchiveDataStore, self).iter_history(key, end_revision, start_revision))
+    
+    def iter_revisions(self, end_revision=None, start_revision=None):
+        return self.iter_extract(super(ArchiveDataStore, self).iter_revisions(end_revision, start_revision))
 
 class ProxyDataStore(object):
     '''
     Uses a stack of different datastores behaving as one
     Common uses include transactions (MemoryDataStore, RevisionDataStore) and 
     loading archives (ArchiveDataStore(1), ArchiveDataStore(2), ...)
+    
+    All iterator methods are run using iterator pools to avoid loading massive result
+    sets into memory.
     '''
     
     def __init__(self, datastores):
         self.datastores = datastores
         
     def store(self, data, commit=None):
-        # just pass to top level datastore
+        '''
+        Just passes the data to the first DataStore
+        '''
         return self.datastores[0].store(data, commit)
     
     def get_item(self, key, end_revision=None, start_revision=None):
+        '''
+        Returns the value from the first DataStore that doesn't raise a KeyError
+        '''
         for ds in self.datastores:
             try:
                 return ds.get_item(key, end_revision, start_revision)
@@ -333,8 +360,8 @@ class ProxyDataStore(object):
     
     def iter_items(self, start_key=None, end_key=None, end_revision=None, start_revision=None):
         '''
-        Creates an iterator pool and yields the highest revision version of each item (within the
-        start_revision and end_revision bounds)
+        Creates an iterator pool and yields (key, packed_revision, value) for the highest revision of
+        each item (within the start_revision and end_revision bounds) between the specified keys.
         '''
         
         # key, revision, value iterator
@@ -359,7 +386,12 @@ class ProxyDataStore(object):
             items = new_items
             
     def iter_get(self, keys, end_revision=None, start_revision=None):
+        '''
+        Creates an iterator pool and yields (key, packed_revision, value) for the highest revision of
+        each item (within the start_revision and end_revision_bounds) for each key in keys.
         
+        If the key does not exist in any revision then yields (key, None, None).
+        '''
         for key in keys:
             found = False
             for ds in self.datastores:
