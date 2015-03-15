@@ -1,9 +1,12 @@
 RepriseDB
 =========
 
-Overiew
--------
 Experimental document database aiming to give the relationship another chance.
+
+**Not usable at the moment!**
+
+Aims
+-------
 
 * Strong consistency - full ACID compliance across data and indexes
 * Long running transactions - ability to rectify issues and re-commit
