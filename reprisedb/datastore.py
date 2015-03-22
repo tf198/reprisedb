@@ -39,12 +39,18 @@ class RevisionDataStore(object):
             raise Exception("Cannot revision version %d, already at %d" % (revision, self.current_revision))
         
         items = ( (self.revision_packer.append_last(key, revision), value) for key, value in data )
-        with self.env.begin(write=True) as txn:
-            with txn.cursor() as c:
-                consumed, _added = c.putmulti(items)
         
+        added = self.raw_store(items)
         self.current_revision = revision
         
+        return added
+    
+    def raw_store(self, data):
+        
+        with self.env.begin(write=True) as txn:
+            with txn.cursor() as c:
+                consumed, _added = c.putmulti(data)
+                
         return consumed
 
     def iter_get(self, keys, end_revision=None, start_revision=None):

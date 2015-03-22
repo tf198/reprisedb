@@ -13,115 +13,49 @@ class RepriseDBIntegrityError(Exception): pass
 
 class RepriseDB(object):
     
+    META_META = {'name': '_meta', 
+                 'key_packer': 'p_string',
+                 'value_packer': 'p_obj',
+                 'indexes': {}}
+    
+    COMMIT_META = {'name': '_commits',
+                   'key_packer': 'p_uint32',
+                   'value_packer': 'p_obj',
+                   'indexes': {}}
+    
     def __init__(self, **config):
         
-        path = config.get('path', 'data')
+        path = config.pop('path', 'data')
          
-        self.driver = config.get('driver', drivers.LMDBDriver)(path)
+        driver = config.pop('driver', drivers.LMDBDriver)
+         
+        self.driver = driver(path, **config)
         
         self._collections = {}
         
-        # manually configure the meta collection
-        self._collections['_meta'] = Collection({'name': '_meta', 
-                                                 'key_packer': 'p_string',
-                                                 'value_packer': 'p_obj',
-                                                 'indexes': {}})
-        
-        self._collections['_commits'] = Collection({'name': '_commits',
-                                                    'key_packer': 'p_uint32',
-                                                    'value_packer': 'p_obj',
-                                                    'indexes': {}})
+        self.meta_entry = entries.Entry(packers.p_string, packers.p_obj)
         
         self._rds = {}
         
         self._current_commit = 0 # need to set to something
-        t = Transaction(self, None)
+        t = self.begin()
         self._current_commit = t.get('_commits', 0)
-        
+       
         if self._current_commit is None:
             logger.debug("Initialising database")
             self._current_commit = 0
             t.put('_meta', 'info:version', '0.1.1', False)
             assert t.commit(0) == 1
         
-        logger.debug("Current commit: %d", self._current_commit)
+        logger.debug("Current commit: %s", self._current_commit)
     
     def meta_key(self, collection):
         return "collection:{0}".format(collection)
-    
-    def get_collection(self, name):
-        
-        if not name in self._collections:
-        
-            t = self.begin()
-            meta = t.get('_meta', self.meta_key(name))
-            
-            if meta is None:
-                raise Exception("No collection named %s" % name)
-            
-            logger.debug("Creating collection %s", name)
-            
-            self._collections[name] = Collection(meta)
-            
-        return self._collections[name]
     
     def get_rds(self, name):
         if not name in self._rds:
             self._rds[name] = datastore.RevisionDataStore(self.driver.get_db(name), self._current_commit)
         return self._rds[name]
-    
-    def drop_collection(self, name):
-        c = self.get_collection(name)
-            
-        for accessor in c.meta['indexes']:
-            self.driver.drop_db('{0}.{1}'.format(name, accessor))
-            
-        self.driver.drop_db(name)
-        
-        t = self.begin()
-        t.delete('_meta', self.meta_key(name))
-        t.commit()
-        
-        del self._collections[name]
-    
-    def create_collection(self, name, key_packer='p_uint32', value_packer='p_dict'):
-        
-        if name in self._collections:
-            raise Exception("Already a collection named %s" % name)
-        
-        t = self.begin()
-        
-        meta_key = self.meta_key(name)
-        
-        meta = t.get('_meta', meta_key)
-        
-        if meta is not None:
-            raise Exception("Already a collection named %s" % name)
-        
-        meta = {'name': name,
-                'key_packer': key_packer,
-                'value_packer': value_packer,
-                'indexes': {}}
-        
-        t.put('_meta', meta_key, meta)
-        t.commit()
-        
-        self._collections[name] = Collection(meta)
-        
-        return self._collections[name]
-    
-    def add_index(self, collection, accessor, value_packer):
-        c = self.get_collection(collection)
-        
-        current = c.meta['indexes']
-        if accessor in current:
-            raise Exception("Already an index on %s" % accessor)
-        
-        current[accessor] = value_packer
-        
-        t = self.begin()
-        t.put('_meta', self.meta_key(collection), c.meta)
-        t.commit()
     
     def current_commit(self):
         return self._current_commit
@@ -129,26 +63,15 @@ class RepriseDB(object):
     def begin(self, commit=None):
         if commit is None: commit = self._current_commit
         return Transaction(self, commit)
-    
-    @contextmanager
-    def commit_resource(self):
-        try:
-            self._current_commit += 1
-            yield self._current_commit
-        except:
-            self._current_commit -= 1
-            raise
         
-    def do_commit(self, commit):
+    def _try_commit(self, commit):
         
         if commit != self._current_commit:
             raise RepriseDBIntegrityError("Current commit is %d" % self._current_commit)
         
         self._current_commit += 1
         return self._current_commit
-        
-            
-            
+              
 class Collection(object):
     '''
     A collection is an Entry (controlled by a key_packer and value_packer) and
@@ -192,8 +115,9 @@ class Collection(object):
             if not accessor in self.meta['indexes']:
                 raise KeyError("No index available for %s" % accessor)
             
-            packer = self.meta['indexes'][accessor]
-            self._indexes[accessor] = entries.Index(self.key_packer, getattr(packers, packer))
+            index_type, value_packer = self.meta['indexes'][accessor]
+            index_cls = getattr(entries, index_type)
+            self._indexes[accessor] = index_cls(self.key_packer, packers.registry[value_packer])
             
         return "{0}.{1}".format(self.name, accessor), self._indexes[accessor]
     
@@ -205,6 +129,121 @@ class Transaction(object):
         
         self._datastores = SortedDict()
         self._updates = {}
+        
+        self._collections = {}
+        
+        self._collections['_meta'] = Collection(self.db.META_META)
+        self._collections['_commits'] = Collection(self.db.COMMIT_META)
+        self._post_commit = []
+        
+    def get_collection(self, name):
+        
+        if not name in self._collections:
+            # manually pull the meta
+            meta_entry = entries.BoundEntry(self.db.meta_entry, self.db.get_rds('_meta'), self.current_commit)
+            meta = meta_entry.get(self.db.meta_key(name))
+            self._collections[name] = Collection(meta)
+        
+        return self._collections[name]
+
+    def create_collection(self, name, key_packer='p_uint32', value_packer='p_dict'):
+         
+        meta_key = self.db.meta_key(name)
+         
+        meta = self.get('_meta', meta_key)
+         
+        if meta is not None:
+            raise Exception("Already a collection named %s" % name)
+         
+        meta = {'name': name,
+                'key_packer': key_packer,
+                'value_packer': value_packer,
+                'indexes': {}}
+         
+        self.put('_meta', meta_key, meta)
+         
+        self._collections[name] = Collection(meta)
+         
+        return self._collections[name]
+    
+    def drop_collection(self, name):
+        c = self.get_collection(name)        
+        
+        to_remove = [ '{0}.{1}'.format(name, accessor) for accessor in c.meta['indexes'] ]
+        to_remove.append(name)
+        
+        def cleanup():
+            logger.debug("Cleaning up database files")
+            for f in to_remove:
+                self.db.driver.drop_db(f)
+        
+        self._post_commit.append(cleanup)
+        self.delete('_meta', self.db.meta_key(name))
+        
+        del self._collections[name]
+      
+    def list_collections(self):
+        return [ x[11:] for x in self.keys('_meta', start_key='collection:', end_key='collection:~') ]
+    
+    def add_index(self, collection, accessor, value_packer='string'):
+        c = self.get_collection(collection)
+         
+        current = c.meta['indexes']
+        if accessor in current:
+            raise Exception("Already an index on %s" % accessor)
+         
+        if not value_packer in packers.registry:
+            raise Exception("Unknown value packer: %s" % value_packer)
+         
+        current[accessor] = ['SimpleIndex', value_packer]
+        
+        db, indexer = c.get_indexer(accessor)
+        
+        rds = self.db.get_rds(db)
+        
+        def g():
+            pk = pr = pv = None
+            
+            ds = self.get_datastore(collection)
+            ds = ds.datastores[1] # TODO: FIX
+            
+            for k, r, v in ds.iter_revisions(end_revision=self.current_commit):
+                k = c.entry.from_db_key(k)
+                v = c.entry.from_db_value(v)
+                
+                # will get them in latest to earliest order
+                if k == pk:
+                    # add an un-index for the previous key
+                    data = indexer.prepare(pv, pk, '-')
+                    yield data[0] + pr, data[1]
+                    
+                v = utils.dotted_accessor(v, accessor)
+                
+                if v is not None:
+                
+                    data = indexer.prepare(v, k, '+')
+                    #print "DATA", data
+                    yield data[0] + r, data[1]
+                
+                pk, pr, pv = k, r, v
+            
+        rds.raw_store(g())
+         
+        self.put('_meta', self.db.meta_key(collection), c.meta)
+        
+    def drop_index(self, collection, accessor):
+        c = self.get_collection(collection)
+        
+        db, _indexer = c.get_indexer(accessor)
+        
+        def cleanup():
+            logger.debug("Removing index datafile for %s", db)
+            self.db.driver.drop_db(db)
+        
+        del c.meta['indexes'][accessor]
+        del c._indexes[accessor]
+        
+        self._put('_meta', self.db.meta_key(collection), c.meta)
     
     def get_datastore(self, name):
         if not name in self._datastores:
@@ -214,10 +253,10 @@ class Transaction(object):
         return self._datastores[name]
     
     def get_entry(self, collection):
-        return entries.BoundEntry(self.db.get_collection(collection).entry, self.get_datastore(collection), self.current_commit)
+        return entries.BoundEntry(self.get_collection(collection).entry, self.get_datastore(collection), self.current_commit)
     
     def get_index(self, collection, accessor):
-        c = self.db.get_collection(collection)
+        c = self.get_collection(collection)
         db, indexer = c.get_indexer(accessor)
         return entries.BoundIndex(indexer, self.get_datastore(db), self.current_commit)
     
@@ -227,6 +266,9 @@ class Transaction(object):
             return self.get_entry(collection).get(key)
         except KeyError:
             return default
+    
+    def each(self, collection, start_key=None, end_key=None):
+        return self.get_entry(collection).iter_items(start_key, end_key)
     
     def put(self, collection, pk, value, index=True, track=True):
         
@@ -240,7 +282,7 @@ class Transaction(object):
                 return False
         
         
-        c = self.db.get_collection(collection)
+        c = self.get_collection(collection)
         
         #self._data.add((collection, ) + c.entry.prepare(pk, value))
         self.get_datastore(collection).store([c.entry.prepare(pk, value)])
@@ -252,12 +294,20 @@ class Transaction(object):
         self._updates.setdefault(collection, set()).add(pk)
         
         return True
+    
+    def bulk_put(self, collection, items, index=True, track=True):
         
+        if hasattr(items, 'iteritems'):
+            items = items.iteritems()
+            
+        for k, v in items:
+            self.put(collection, k, v, index, track)
+    
     def delete(self, collection, pk):
         self.put(collection, pk, None)
         
-    def keys(self, collection):
-        return self.get_entry(collection).keys()
+    def keys(self, collection, start_key=None, end_key=None):
+        return self.get_entry(collection).keys(start_key, end_key)
 
     def lookup(self, collection, accessor, start_key, end_key=None, offset=0, length=None):
         
@@ -270,19 +320,42 @@ class Transaction(object):
             i = itertools.islice(i, offset, length)
         
         return list(i)
+    
+    def index(self, collection, accessor):
+        c = self.get_collection(collection)
         
+        ds = self.get_datastore(collection)
         
-    def commit(self, c=None):
+        db, indexer = c.get_indexer(accessor)
+        
+        def g():
+            pk, pr, pv = None
+            
+            for k, r, v in ds.iter_revisions(end_revision=self._current_commit):
+                # will get them in latest to earliest order
+                if k == pk:
+                    # add an un-index for the previous key
+                    yield indexer.prepare(pv, pk, '-')
+                    
+                v = utils.dotted_accessor(v, accessor)
+                
+                yield indexer.prepare(v, k, '+')
+                
+                pk, pr, pv = k, r, v
+                
+        return g()
+        
+    def commit(self, c=None, autoresolve=True):
         
         if c is None: c = self.current_commit
         
         # this throws an exception if the transaction is not commitable
         try:
-            self.current_commit = self.db.do_commit(c)
+            self.current_commit = self.db._try_commit(c)
         except RepriseDBIntegrityError:
             # try and resolve them
-            if self.conflicts() is None:
-                self.current_commit = self.db.do_commit(self.current_commit)
+            if autoresolve and self.conflicts() is None:
+                self.current_commit = self.db._try_commit(self.current_commit)
             else:
                 raise
         
@@ -297,6 +370,10 @@ class Transaction(object):
             ms = ds.datastores[0]
             self.db.get_rds(n).store(ms.iteritems(), self.current_commit)
         
+        for m in self._post_commit:
+            m()
+        
+        self._post_commit = []
         self._datastores.clear()
         self._updates = {}
         
@@ -316,7 +393,7 @@ class Transaction(object):
             for n, items in commit['updates'].iteritems():
                 for k in self._updates.setdefault(n, set()) & set(items):
                     logger.debug("CONFLICT: %r, %r, %r", n, k, c)
-                    result.append((n, k, c, t.get(n, k)))
+                    result.append((n, k, c))
             
             if not result:
                 logger.debug("Non blocking commit: %d", c)
@@ -336,39 +413,39 @@ if __name__ == '__main__':
     
     db = RepriseDB(path='testing')
     
-    db.create_collection('people')
-    
-    db.add_index('people', 'first_name', 'p_string')
-    
     t1 = db.begin()
     
+    t1.create_collection('people')
+    
+    t1.add_index('people', 'first_name', 'p_string')
+
     t1.put('people', 1, {'first_name': 'Bob'})
     print t1.get('people', 1)
     assert t1.get('people', 1)['first_name'] == 'Bob'
-    
+     
     assert t1.keys('people') == [1]
-     
+      
     print "COMMIT", t1.commit()
-     
+      
     assert t1.lookup('people', 'first_name', 'Boa', 'Bod') == [1]
     assert t1.lookup('people', 'first_name', 'Char', 'Chad') == []
      
     t2 = db.begin()
     assert t2.get('people', 1)['first_name'] == 'Bob'
     assert t2.lookup('people', 'first_name', 'Boa', 'Bod') == [1]
-      
+       
     t2.put('people', 1, {'first_name': 'Robert'})
     t2.put('people', 2, {'first_name': 'Andy'})
     t2.put('people', 3, {'first_name': 'Andrew'})
-      
+       
     assert t2.get('people', 1)['first_name'] == 'Robert'
     assert t1.get('people', 1)['first_name'] == 'Bob'
-      
+       
     assert t2.lookup('people', 'first_name', 'A', 'C') == [2, 3]
     assert t1.lookup('people', 'first_name', 'A', 'C') == [1]
-     
+      
     t2.commit()
-     
+      
     t1.put('people', 2, {'first_name': 'Dave'})
     try:
         t1.commit()
@@ -403,7 +480,9 @@ if __name__ == '__main__':
 #     print "Bob", t3.lookup('people', 'first_name', 'Bob')
 #   
     logging.getLogger().setLevel(logging.WARNING)
-    db.drop_collection('people')
+    t = db.begin()
+    t.drop_collection('people')
+    t.commit()
     
 #     
     

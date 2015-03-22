@@ -26,16 +26,22 @@ class DatabaseTestCase(TestCase):
         for f in os.listdir(self.TESTDIR):
             os.unlink(os.path.join(self.TESTDIR, f))
     
-    def load_data(self, data):
+    def load_data(self, collection, data, key_packer='p_uint32', value_packer='p_dict'):
         t = self.db.begin()
-        for c, k, v in data:
-            t.put(c, k, v)
+        t.create_collection(collection, key_packer, value_packer)
+        
+        if hasattr(data, 'iteritems'):
+            data = data.iteritems()
+        
+        for k, v in data:
+            t.put(collection, k, v)
         t.commit()
     
     def test_load_data(self):
-        self.db.create_collection('people', value_packer='p_string')
-        self.load_data((('people', 1, 'Bob'),
-                        ('people', 2, 'Fred')))
+        t = self.db.begin()
+        t.create_collection('people', value_packer='p_string')
+        t.bulk_put('people', ({1: 'Bob', 2: 'Fred'}))
+        t.commit()
         
         t = self.db.begin()
         
@@ -43,13 +49,15 @@ class DatabaseTestCase(TestCase):
         self.assertEqual(t.keys('people'), [1, 2])
         
     def test_lookups(self):
-        self.db.create_collection('people', value_packer='p_dict')
-        self.db.add_index('people', 'name', 'p_string')
-        self.load_data((('people', 3, {'name': 'Bob'}),
-                        ('people', 6, {'name': 'Brenda'}),
-                        ('people', 23, {'name': 'Borris'}),
-                        ('people', 9, {'name': 'Andy'}),
-                        ('people', 12, {'name': 'Zavier'})))
+        t = self.db.begin()
+        t.create_collection('people')
+        t.add_index('people', 'name', 'string')
+        t.bulk_put('people', ((3 , {'name': 'Bob'}),
+                              (6 , {'name': 'Brenda'}),
+                              (23, {'name': 'Borris'}),
+                              (9 , {'name': 'Andy'}),
+                              (12, {'name': 'Zavier'})))
+        t.commit()
         
         t = self.db.begin()
         
@@ -74,10 +82,36 @@ class DatabaseTestCase(TestCase):
         self.assertEqual(t.lookup('people', 'name', 'Andy', 'C', length=2), [9, 3])
         self.assertEqual(t.lookup('people', 'name', 'Andy', 'C', offset=1, length=2), [3, 6])
         
+    def test_indexing(self):
+        t = self.db.begin()
+        t.create_collection('people')
+        t.bulk_put('people', {1: {'first_name': 'Bob'},
+                              2: {'first_name': 'Fred', 'age': 29}})
+        t.commit()
+        
+        t.add_index('people', 'first_name', 'string')
+        t.add_index('people', 'age', 'uint8')
+        
+        self.assertEqual(t.lookup('people', 'first_name', 'Bob'), [1])
+        self.assertEqual(t.lookup('people', 'age', 18, 30), [2])
+        
+        t.commit()
+        
+        t.bulk_put('people', {1: {'first_name': 'Robert', 'age': 18},
+                              3: {'first_name': 'Dave', 'age': 23},
+                              4: {'first_name': 'Andy', 'age': 30}})
+        
+        self.assertEqual(t.lookup('people', 'first_name', 'Robert'), [1])
+        self.assertEqual(t.lookup('people', 'first_name', 'Bob'), [])
+        
+        self.assertEqual(t.lookup('people', 'age', 18, 30), [1, 3, 2])
+        
+        
     def test_blocked_commit(self):
-        self.db.create_collection('people', value_packer='p_string')
-        self.load_data((('people', 1, 'Bob'),
-                        ('people', 2, 'Fred')))
+        t = self.db.begin()
+        t.create_collection('people', value_packer='p_string')
+        t.bulk_put('people', {1: 'Bob', 2: 'Fred'})
+        t.commit()
         
         t1 = self.db.begin()
         t2 = self.db.begin()
@@ -88,15 +122,18 @@ class DatabaseTestCase(TestCase):
         t2.put('people', 3, 'Andy')
         t2.put('people', 1, 'Jane')
         
+        print "C1", c1
+        
         with self.assertRaisesRegexp(database.RepriseDBIntegrityError, 'Current commit is %d' % c1):
             t2.commit()
             
-        self.assertEqual(t2.conflicts(), [('people', 3, 4, 'Dave')])
-        
+        self.assertEqual(t2.conflicts(), [('people', 3, 3)])
+                
     def test_nonblocked_commit(self):
-        self.db.create_collection('people', value_packer='p_string')
-        self.load_data((('people', 1, 'Bob'),
-                        ('people', 2, 'Fred')))
+        t = self.db.begin()
+        t.create_collection('people', value_packer='p_string')
+        t.bulk_put('people', {1: 'Bob', 2: 'Fred'})
+        t.commit()
         
         t1 = self.db.begin()
         t2 = self.db.begin()

@@ -55,7 +55,7 @@ class EntriesTestCase(RepriseDBTestCase):
         assert people.keys() == [134, 148, 156]
         
     def test_int_string_index(self):
-        index = entries.Index(packers.p_uint32, packers.p_string)
+        index = entries.SimpleIndex(packers.p_uint32, packers.p_string)
         people_names = entries.BoundIndex(index, self.rds)
            
         people_names.bulk_add([('Andy', 134, '+'),

@@ -2,6 +2,7 @@ from unittest import TestCase
 from reprisedb import database
 
 import os.path
+import shutil
 
 
 class RepriseDBTestCase(TestCase):
@@ -20,7 +21,11 @@ class RepriseDBTestCase(TestCase):
     @classmethod
     def clean_dir(cls):
         for f in os.listdir(cls.TESTDIR):
-            os.unlink(os.path.join(cls.TESTDIR, f))
+            p = os.path.join(cls.TESTDIR, f)
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+            else:
+                os.unlink(p)
     
     def tearDown(self):
         self.clean_dir()

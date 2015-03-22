@@ -169,6 +169,18 @@ p_dict = MsgpackPacker()
 p_obj = MsgpackPacker()
 p_revision = RevisionPacker(">I")
 
+registry = {'uint32': p_uint32,
+            'uint16': p_uint16,
+            'uint8': p_uint8,
+            'int32': p_int32,
+            'int16': p_int16,
+            'float': p_float,
+            'string': p_string,
+            'dict': p_dict,
+            'obj': p_obj,
+            'revision': p_revision}
+
+
 if __name__ == '__main__':
     import doctest
     print doctest.testmod()

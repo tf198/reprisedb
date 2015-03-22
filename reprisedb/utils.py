@@ -10,3 +10,4 @@ def dotted_accessor(d, accessor, default=None):
         return d
     except KeyError:
         return default
+    

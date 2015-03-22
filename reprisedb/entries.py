@@ -105,17 +105,17 @@ class BoundEntry(object):
             
         return v is not None
         
-    def keys(self):
-        return list(self.iter_keys())
+    def keys(self, start_key=None, end_key=None):
+        return list(self.iter_keys(start_key, end_key))
 
-class Index(BaseEntry):
+class SimpleIndex(BaseEntry):
     
     def to_db_key(self, value, pk):
         '''
-        >>> Index(packers.p_uint32, packers.p_string).to_db_key('Bob', 34)
+        >>> SimpleIndex(packers.p_uint32, packers.p_string).to_db_key('Bob', 34)
         'Bob\\x00\\x00\\x00\\x00\x22'
         
-        >>> Index(packers.p_string, packers.p_string).to_db_key('foo', 'bar')
+        >>> SimpleIndex(packers.p_string, packers.p_string).to_db_key('foo', 'bar')
         'foo\\x00bar\\x00\\x04'
         '''
         key = self.value_packer.pack(value, index=True)
@@ -123,9 +123,9 @@ class Index(BaseEntry):
     
     def from_db_key(self, db_key):
         '''
-        >>> Index(packers.p_uint32, packers.p_string).from_db_key('Bob\\x00\\x00\\x00\\x00\\x22')
+        >>> SimpleIndex(packers.p_uint32, packers.p_string).from_db_key('Bob\\x00\\x00\\x00\\x00\\x22')
         ('Bob', 34)
-        >>> Index(packers.p_string, packers.p_string).from_db_key('foo\\x00bar\\x00\\x04')
+        >>> SimpleIndex(packers.p_string, packers.p_string).from_db_key('foo\\x00bar\\x00\\x04')
         ('foo', 'bar')
         '''
         value, pk = self.key_packer.extract_last(db_key)
@@ -133,7 +133,7 @@ class Index(BaseEntry):
     
     def prepare(self, value, pk, mark):
         '''
-        >>> Index(packers.p_uint32, packers.p_string).prepare('Bob', 34, '+')
+        >>> SimpleIndex(packers.p_uint32, packers.p_string).prepare('Bob', 34, '+')
         ('Bob\\x00\\x00\\x00\\x00\x22', '+')
         '''
         if not mark in ['+', '-']:
@@ -142,9 +142,9 @@ class Index(BaseEntry):
     
     def key_range(self, start_key, end_key=None):
         '''
-        >>> Index(packers.p_uint32, packers.p_string).key_range('Boa', 'Bod')
+        >>> SimpleIndex(packers.p_uint32, packers.p_string).key_range('Boa', 'Bod')
         ('Boa\\x00', 'Bod\\x00')
-        >>> Index(packers.p_uint32, packers.p_string).key_range('Bob')
+        >>> SimpleIndex(packers.p_uint32, packers.p_string).key_range('Bob')
         ('Bob\\x00', 'Bob\\x01')
         '''
         a = self.value_packer.pack(start_key)
@@ -179,3 +179,7 @@ class BoundIndex(object):
     
     def lookup(self, start_key, end_key=None):
         return list(self.iter_lookup_keys(start_key, end_key))
+    
+if __name__ == '__main__':
+    import doctest
+    print doctest.testmod()
