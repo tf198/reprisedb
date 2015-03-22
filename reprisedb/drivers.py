@@ -48,13 +48,33 @@ class BaseDriver(object):
         return True
 
 class LMDBDriver(BaseDriver):
-        
-    def open_db(self, name):
+    
+    def __init__(self, path, **config):
         if not HAS_LMDB:
             raise RuntimeError("LMDB library not installed")
         
-        return lmdb.open(os.path.join(self.path, name), subdir=False, **self.config)
+        super(LMDBDriver, self).__init__(path, **config)
+        config.setdefault('max_dbs', 128)
+        logger.debug("Driver config: %r", config)
+        
+        self.env = lmdb.open(os.path.join(self.path, 'data'), subdir=False, **config)
     
+    def open_db(self, name):
+        return LMDBDatabase(self.env, self.env.open_db(name))
+        
+    def drop_db(self, name):
+        with self.env.begin(write=True) as txn:
+            txn.drop_db(name, True)
+        del self.dbs[name]
+            
+class LMDBDatabase(object):
+    
+    def __init__(self, env, db):
+        self.env = env
+        self.db = db
+        
+    def begin(self, **opts):
+        return self.env.begin(db=self.db, **opts)
 
 class BSDDBDriver(BaseDriver):
     
@@ -119,6 +139,10 @@ class BSDDBCursor(object):
     def putmulti(self, d):
         self.db.update(d)
         return None, None
+    
+    def delete(self):
+        del self.db[self._key]
+        self.set_range(self._key)
     
     def _call_and_set(self, method, *args, **kwargs):
         try:
