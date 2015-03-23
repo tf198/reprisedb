@@ -55,6 +55,7 @@ class LMDBDriver(BaseDriver):
         
         super(LMDBDriver, self).__init__(path, **config)
         config.setdefault('max_dbs', 128)
+        config.setdefault('map_size', 100 * 1024 * 1024 * 1024)
         logger.debug("Driver config: %r", config)
         
         self.env = lmdb.open(os.path.join(self.path, 'data'), subdir=False, **config)
@@ -75,6 +76,13 @@ class LMDBDatabase(object):
         
     def begin(self, **opts):
         return self.env.begin(db=self.db, **opts)
+    
+    def path(self):
+        return self.env.path()
+    
+    def stat(self):
+        with self.env.begin(db=self.db) as txn:
+            return txn.stat()
 
 class BSDDBDriver(BaseDriver):
     

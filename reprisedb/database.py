@@ -308,6 +308,9 @@ class Transaction(object):
         
     def keys(self, collection, start_key=None, end_key=None):
         return self.get_entry(collection).keys(start_key, end_key)
+    
+    def count(self, collection, start_key=None, end_key=None):
+        return len(self.keys(collection, start_key, end_key))
 
     def lookup(self, collection, accessor, start_key, end_key=None, offset=0, length=None):
         
@@ -378,6 +381,19 @@ class Transaction(object):
         self._updates = {}
         
         return self.current_commit
+    
+    def rollback(self, c=None):
+        
+        if c is None:
+            c = self.db.current_commit()
+        
+        self._post_commit = []
+        self._datastores.clear()
+        self._updates = {}
+        
+        self.current_commit = c
+        
+        return c
     
     def conflicts(self):
         result = []
