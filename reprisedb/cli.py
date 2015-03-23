@@ -42,7 +42,7 @@ def import_csv(db, collection, filename):
             t.put(collection, pk, data)
             pk += 1
             
-            if pk > 500: break
+            #if pk > 500: break
             
     t.commit()
             
@@ -55,7 +55,7 @@ def import_data(options):
 
 def shell(options):
     db = database.RepriseDB(path=options.datadir)
-    code.interact("RepriseDB Interactive Shell", local={'db': db})
+    code.interact("RepriseDB Interactive Shell", local={'db': db, 't': db.begin()})
     
 
 if __name__ == '__main__':
